@@ -87,13 +87,18 @@ import qualified Data.Text.Short as ST
 --
 -- @tag@ represents which kind of JSON the Encoding is encoding to,
 -- we reuse 'Text' and 'Value' as tags here.
+-- newtype Encoding' tag = Encoding {
+--       fromEncoding :: Builder
+--       -- ^ Acquire the underlying bytestring builder.
+--     } deriving (Typeable)
+
+-- | Often used synonym for 'Encoding''.
+type Encoding = Encoding' Value
+
 newtype Encoding' tag = Encoding {
       fromEncoding :: Builder
       -- ^ Acquire the underlying bytestring builder.
     } deriving (Typeable)
-
--- | Often used synonym for 'Encoding''.
-type Encoding = Encoding' Value
 
 -- | Make Encoding from Builder.
 --
