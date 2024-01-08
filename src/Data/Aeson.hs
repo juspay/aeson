@@ -80,7 +80,7 @@ module Data.Aeson
     , ToJSON(..)
     , KeyValue(..)
     , (<?>)
-    , JSONPath
+    , JSONPath (..)
     -- ** Keys for maps
     , ToJSONKey(..)
     , ToJSONKeyFunction(..)
@@ -111,6 +111,7 @@ module Data.Aeson
     , ToArgs
     , Zero
     , One
+    , getFieldName
     , genericToJSON
     , genericLiftToJSON
     , genericToEncoding
@@ -169,7 +170,7 @@ import Data.Aeson.Types.FromJSON (ifromJSON, parseIndexedJSON)
 import Data.Aeson.Encoding (encodingToLazyByteString)
 import Data.Aeson.Parser.Internal (decodeWith, decodeStrictWith, eitherDecodeWith, eitherDecodeStrictWith, jsonEOF, json, jsonEOF', json', addFieldNameToErrorResp)
 import Data.Aeson.Types
-import Data.Aeson.Types.Internal (IResult(..), ErrorResp(..) , ErrorType(..))
+import Data.Aeson.Types.Internal (IResult(..), ErrorResp(..) , ErrorType(..), getFieldName)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 

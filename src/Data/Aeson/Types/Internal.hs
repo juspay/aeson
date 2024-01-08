@@ -145,7 +145,7 @@ data IResult a = IError JSONPath String
                | ISuccess a
                deriving (Eq, Show, Typeable)
 
-data ErrorResp = ErrorResp {errorType :: ErrorType, field :: Maybe String, objectType :: Maybe String, message :: Maybe String , expected :: Maybe String, actual :: Maybe String, path :: Maybe JSONPath}
+data ErrorResp = ErrorResp {errorType :: ErrorType, errField :: Maybe String, objectType :: Maybe String, errMessage :: Maybe String , expectedValue :: Maybe String, actualValue :: Maybe String, jPath :: Maybe JSONPath}
     deriving (Eq, Show, Typeable, Read)
 
 data ErrorType = MISSING_FIELD | TYPE_MISMATCH | GENERAL
@@ -694,7 +694,7 @@ defaultErrorObject = ErrorResp GENERAL Nothing Nothing Nothing Nothing Nothing N
 addFieldNameToErrorResp :: JSONPath -> String -> String
 addFieldNameToErrorResp path err =
     case (readMaybe err :: Maybe ErrorResp) of
-        Just err' -> show $ err' {field = maybe (getFieldName path) Just $ field err', path = Just path}
+        Just err' -> show $ err' {errField = maybe (getFieldName path) Just $ errField err', jPath = Just path}
         Nothing -> err
 
 addObjectType :: String -> Parser a -> Parser a
@@ -713,16 +713,16 @@ addMessage mess (Parser p) = Parser $ \path kf ks ->
         go :: String -> String -> String
         go err mess=
             case (readMaybe err :: Maybe ErrorResp) of
-                Just err' -> show $ err' {message = Just $ maybe mess (\val -> val ++ "," ++ mess) $ message err'}
+                Just err' -> show $ err' {errMessage = Just $ maybe mess (\val -> val ++ "," ++ mess) $ errMessage err'}
                 Nothing -> err
 
 typeMismatchErr :: Maybe String -> String -> String -> String
 typeMismatchErr objectType expected actual = show $
-            defaultErrorObject {errorType = TYPE_MISMATCH, expected = Just $ expected, actual= Just $ actual, objectType = objectType}
+            defaultErrorObject {errorType = TYPE_MISMATCH, expectedValue = Just $ expected, actualValue = Just $ actual, objectType = objectType}
 
 missingFieldErr :: Maybe String -> String -> String
 missingFieldErr objectType field = show $
-            defaultErrorObject {errorType = MISSING_FIELD, field = objectType}
+            defaultErrorObject {errorType = MISSING_FIELD, errField = Just field, objectType = objectType}
 -- | A key\/value pair for an 'Object'.
 type Pair = (Key, Value)
 
