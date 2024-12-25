@@ -5,7 +5,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards,LambdaCase,ScopedTypeVariables #-}
 #if __GLASGOW_HASKELL__ >= 800
 -- a) THQ works on cross-compilers and unregisterised GHCs
 -- b) may make compilation faster as no dynamic loading is ever needed (not sure about this)
@@ -129,6 +129,10 @@ import qualified Data.Text as T
 import qualified Test.QuickCheck as QC
 import Witherable (ordNub)
 
+import Text.ParserCombinators.ReadP
+import Control.Applicative ((<|>))
+import Data.Char (isSpace)
+import qualified Data.List as L
 -- | Elements of a JSON path used to describe the location of an
 -- error.
 data JSONPathElement = Key Key
@@ -137,19 +141,143 @@ data JSONPathElement = Key Key
                      | Index {-# UNPACK #-} !Int
                        -- ^ JSON path element of an index into an
                        -- array, \"array[index]\".
-                       deriving (Eq, Show, Typeable, Ord, Read)
+                       deriving (Eq, Typeable, Ord)
 type JSONPath = [JSONPathElement]
 
 -- | The internal result of running a 'Parser'.
 data IResult a = IError JSONPath String
                | ISuccess a
-               deriving (Eq, Show, Typeable)
+               deriving (Eq, Typeable)
 
 data ErrorResp = ErrorResp {errorType :: ErrorType, errField :: Maybe String, objectType :: Maybe String, errMessage :: Maybe String , expectedValue :: Maybe String, actualValue :: Maybe String, jPath :: Maybe JSONPath}
-    deriving (Eq, Show, Typeable, Read)
+    deriving (Eq, Typeable)
 
 data ErrorType = MISSING_FIELD | TYPE_MISMATCH | GENERAL
-    deriving (Eq, Show, Typeable, Read)
+    deriving (Eq, Typeable)
+
+-- Helper functions
+quote :: String -> String
+quote s = "\"" ++ s ++ "\""
+
+showMaybe :: (a -> String) -> Maybe a -> String
+showMaybe _ Nothing = "null"
+showMaybe f (Just x) = f x
+
+-- Show instances
+instance Show ErrorType where
+    show MISSING_FIELD = quote "MISSING_FIELD"
+    show TYPE_MISMATCH = quote "TYPE_MISMATCH"
+    show GENERAL = quote "GENERAL"
+
+instance Show JSONPathElement where
+    show (Key k) = "{\"type\":\"key\",\"value\":" ++ quote (Key.toString k) ++ "}"
+    show (Index i) = "{\"type\":\"index\",\"value\":" ++ show i ++ "}"
+
+instance Show ErrorResp where
+    show ErrorResp{..} = "{\n" ++ 
+        "  \"errorType\": " ++ show errorType ++ ",\n" ++
+        "  \"errField\": " ++ showMaybe quote errField ++ ",\n" ++
+        "  \"objectType\": " ++ showMaybe quote objectType ++ ",\n" ++
+        "  \"errMessage\": " ++ showMaybe quote errMessage ++ ",\n" ++
+        "  \"expectedValue\": " ++ showMaybe quote expectedValue ++ ",\n" ++
+        "  \"actualValue\": " ++ showMaybe quote actualValue ++ ",\n" ++
+        "  \"jPath\": " ++ showMaybe showJPath jPath ++ "\n" ++
+        "}"
+        where
+            showJPath elements = "[" ++ 
+                L.intercalate "," (map show elements) ++ 
+                "]"
+
+
+parseJSONString :: ReadP String
+parseJSONString = between (char '"') (char '"') (Text.ParserCombinators.ReadP.many (satisfy (/= '"')))
+
+parseJSONKey :: ReadP Key
+parseJSONKey = Key.fromString <$> parseJSONString
+
+parseJSONNull :: ReadP (Maybe a)
+parseJSONNull = string "null" >> return Nothing
+
+parseJSONBool :: ReadP Bool
+parseJSONBool = (string "true" >> return True) <|> (string "false" >> return False)
+
+parseErrorType :: ReadP ErrorType
+parseErrorType = between (char '"') (char '"') $ choice
+    [ string "MISSING_FIELD" >> return MISSING_FIELD
+    , string "TYPE_MISMATCH" >> return TYPE_MISMATCH
+    , string "GENERAL" >> return GENERAL
+    ]
+
+parseJSONPathElement :: ReadP JSONPathElement
+parseJSONPathElement = between (char '{') (char '}') $ do
+    skipSpaces
+    string "\"type\""
+    skipSpaces >> char ':' >> skipSpaces
+    typ <- parseJSONString
+    skipSpaces >> char ',' >> skipSpaces
+    string "\"value\""
+    skipSpaces >> char ':' >> skipSpaces
+    case typ of
+        "key" -> Key <$> parseJSONKey
+        "index" -> Index <$> readS_to_P reads
+        _ -> pfail
+
+parseJSONPath :: ReadP [JSONPathElement]
+parseJSONPath = between (char '[') (char ']') $
+    sepBy parseJSONPathElement (skipSpaces >> char ',' >> skipSpaces)
+
+parseField :: String -> ReadP a -> ReadP a
+parseField name parser = do
+    skipSpaces
+    string $ "\"" ++ name ++ "\""
+    skipSpaces >> char ':' >> skipSpaces
+    parser
+
+parseMaybeField :: String -> ReadP a -> ReadP (Maybe a)
+parseMaybeField name parser = 
+    parseField name (parseJSONNull <|> (Just <$> parser))
+
+parseErrorResp :: ReadP ErrorResp
+parseErrorResp = between (char '{') (char '}') $ do
+    skipSpaces
+    errorType <- parseField "errorType" parseErrorType
+    char ',' >> skipSpaces
+    errField <- parseMaybeField "errField" parseJSONString
+    char ',' >> skipSpaces
+    objectType <- parseMaybeField "objectType" parseJSONString
+    char ',' >> skipSpaces
+    errMessage <- parseMaybeField "errMessage" parseJSONString
+    char ',' >> skipSpaces
+    expectedValue <- parseMaybeField "expectedValue" parseJSONString
+    char ',' >> skipSpaces
+    actualValue <- parseMaybeField "actualValue" parseJSONString
+    char ',' >> skipSpaces
+    jPath <- parseMaybeField "jPath" parseJSONPath
+    skipSpaces
+    return ErrorResp{..}
+
+parseJSON :: String -> Maybe ErrorResp
+parseJSON input = case readP_to_S (skipSpaces >> parseErrorResp) input of
+    [(result, "")] -> Just result
+    _ -> Nothing
+
+instance Read ErrorResp where
+    readsPrec _ input = 
+        case readP_to_S (skipSpaces >> parseErrorResp) input of
+            [(result, rest)] -> [(result, rest)]
+            _ -> []
+
+example :: ErrorResp
+example = ErrorResp {
+    errorType = TYPE_MISMATCH,
+    errField = Just "age",
+    objectType = Just "User",
+    errMessage = Just "Invalid type for age",
+    expectedValue = Just "number",
+    actualValue = Just "string",
+    jPath = Just [Key (Key.fromString "user"), Index 0, Key (Key.fromString "profile"), Key (Key.fromString "age")]
+}
+
 -- | The result of running a 'Parser'.
 data Result a = Error String
               | Success a

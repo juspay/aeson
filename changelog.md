@@ -1,5 +1,9 @@
 For the latest version of this document, please see [https://github.com/haskell/aeson/blob/master/changelog.md](https://github.com/haskell/aeson/blob/master/changelog.md).
 
+### 2.1.3.0
+
+* Changed Show/Read instance for ErrorResp to give out json string and read json string back to ErrorResp
+
 ### 2.1.2.1
 
 * Support `th-abstraction-0.5`
