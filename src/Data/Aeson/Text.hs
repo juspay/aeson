@@ -24,8 +24,13 @@ where
 
 import Data.Aeson.Encoding (encodingToLazyByteString)
 import Data.Aeson.Types (ToJSON (..), Value (..))
-import qualified Data.HashMap.Strict as H
-import Data.Scientific (FPFormat (..), Scientific, isInteger)
+import qualified Data.Aeson.KeyMap as KM
+import Data.Scientific (FPFormat(..), Scientific, base10Exponent, isInteger)
+import Data.Text.Lazy.Builder (Builder)
+import qualified Data.Text.Lazy.Builder as TB
+import Data.Text.Lazy.Builder.Scientific (formatScientificBuilder)
+import Numeric (showHex)
+import qualified Data.Aeson.Key as Key
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as LT
 import Data.Text.Lazy.Builder
@@ -53,50 +58,43 @@ encodeToTextBuilder :: ToJSON a => a -> Builder
 encodeToTextBuilder =
   go . toJSON
   where
-    go Null = {-# SCC "go/Null" #-} "null"
-    go (Bool b) = {-# SCC "go/Bool" #-} if b then "true" else "false"
-    go (Number s) = {-# SCC "go/Number" #-} fromScientific s
-    go (String s) = {-# SCC "go/String" #-} string s
+    go Null       = "null"
+    go (Bool b)   = if b then "true" else "false"
+    go (Number s) = fromScientific s
+    go (String s) = string s
     go (Array v)
-      | V.null v = {-# SCC "go/Array" #-} "[]"
-      | otherwise =
-        {-# SCC "go/Array" #-}
-        singleton '['
-          <> go (V.unsafeHead v)
-          <> V.foldr f (singleton ']') (V.unsafeTail v)
-      where
-        f a z = singleton ',' <> go a <> z
-    go (Object m) =
-      {-# SCC "go/Object" #-}
-      case H.toList m of
-        (x : xs) -> singleton '{' <> one x <> foldr f (singleton '}') xs
-        _ -> "{}"
-      where
-        f a z = singleton ',' <> one a <> z
-        one (k, v) = string k <> singleton ':' <> go v
+        | V.null v = "[]"
+        | otherwise = 
+                      TB.singleton '[' <>
+                      go (V.unsafeHead v) <>
+                      V.foldr f (TB.singleton ']') (V.unsafeTail v)
+      where f a z = TB.singleton ',' <> go a <> z
+    go (Object m) = 
+        case KM.toList m of
+          (x:xs) -> TB.singleton '{' <> one x <> foldr f (TB.singleton '}') xs
+          _      -> "{}"
+      where f a z     = TB.singleton ',' <> one a <> z
+            one (k,v) = string (Key.toText k) <> TB.singleton ':' <> go v
 
 string :: T.Text -> Builder
-string s = {-# SCC "string" #-} singleton '"' <> quote s <> singleton '"'
+string s = TB.singleton '"' <> quote s <> TB.singleton '"'
   where
     quote q = case T.uncons t of
-      Nothing -> fromText h
-      Just (!c, t') -> fromText h <> escape c <> quote t'
-      where
-        (h, t) = {-# SCC "break" #-} T.break isEscape q
-    isEscape c =
-      c == '\"'
-        || c == '\\'
-        || c < '\x20'
+                Nothing      -> TB.fromText h
+                Just (!c,t') -> TB.fromText h <> escape c <> quote t'
+        where (h,t) = T.break isEscape q
+    isEscape c = c == '\"' ||
+                 c == '\\' ||
+                 c < '\x20'
     escape '\"' = "\\\""
     escape '\\' = "\\\\"
     escape '\n' = "\\n"
     escape '\r' = "\\r"
     escape '\t' = "\\t"
     escape c
-      | c < '\x20' = fromString $ "\\u" ++ replicate (4 - length h) '0' ++ h
-      | otherwise = singleton c
-      where
-        h = showHex (fromEnum c) ""
+        | c < '\x20' = TB.fromString $ "\\u" ++ replicate (4 - length h) '0' ++ h
+        | otherwise  = TB.singleton c
+        where h = showHex (fromEnum c) ""
 
 fromScientific :: Scientific -> Builder
 fromScientific s = formatScientificBuilder Fixed (if isInteger s then Just 0 else Nothing) s

@@ -3,7 +3,7 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
-#if __GLASGOW_HASKELL__ <= 710 && __GLASGOW_HASKELL__ >= 706
+#if __GLASGOW_HASKELL__ <= 800 && __GLASGOW_HASKELL__ >= 706
 -- Work around a compiler bug
 {-# OPTIONS_GHC -fsimpl-tick-factor=300 #-}
 #endif
@@ -47,20 +47,23 @@ module Data.Aeson.Parser.Internal
     -- ** Handling objects with duplicate keys
     , fromListAccum
     , parseListNoDup
+    -- * Text literal unescaping
+    , unescapeText
     ) where
 
 import Prelude.Compat
 
 import Control.Applicative ((<|>))
 import Control.Monad (void, when)
-import Data.Aeson.Types.Internal (IResult(..), JSONPath, Object, Result(..), Value(..), ErrorResp(..), defaultErrorObject, addFieldNameToErrorResp)
+import Data.Aeson.Types.Internal (IResult(..), JSONPath, Object, Result(..), Value(..), Key, ErrorResp(..), defaultErrorObject, addFieldNameToErrorResp)
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Aeson.Key as Key
 import Data.Attoparsec.ByteString.Char8 (Parser, char, decimal, endOfInput, isDigit_w8, signed, string)
 import Data.Function (fix)
 import Data.Functor.Compat (($>))
 import Data.Bits (testBit)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
-import qualified Data.Text.Encoding as TE
 import Data.Vector (Vector)
 import Data.Word (Word8)
 import qualified Data.Vector as Vector (empty, fromList, fromListN, reverse)
@@ -69,77 +72,20 @@ import qualified Data.Attoparsec.Lazy as L
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Unsafe as B
 import qualified Data.ByteString.Lazy as L
-import qualified Data.HashMap.Strict as H
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.Lazy.Char8 as C
+import qualified Data.ByteString.Builder as B
 import qualified Data.Scientific as Sci
 import Data.Aeson.Parser.Unescape (unescapeText)
+import Data.Aeson.Internal.Integer
+import Data.Aeson.Internal.Text
+import Data.Aeson.Internal.Word8
 
 -------------------------------------------------------------------------------
 -- Word8 ASCII codes as patterns
 -------------------------------------------------------------------------------
 
 -- GHC-8.0 doesn't support giving multiple pattern synonyms type signature at once
-
--- spaces
-pattern W8_SPACE :: Word8
-pattern W8_NL    :: Word8
-pattern W8_CR    :: Word8
-pattern W8_TAB   :: Word8
-
-pattern W8_SPACE = 0x20
-pattern W8_NL    = 0x0a
-pattern W8_CR    = 0x0d
-pattern W8_TAB   = 0x09
-
--- punctuation
-pattern W8_BACKSLASH    :: Word8
-pattern W8_DOUBLE_QUOTE :: Word8
-pattern W8_DOT          :: Word8
-pattern W8_COMMA        :: Word8
-
-pattern W8_BACKSLASH    = 92
-pattern W8_COMMA        = 44
-pattern W8_DOT          = 46
-pattern W8_DOUBLE_QUOTE = 34
-
--- parentheses
-pattern W8_CLOSE_CURLY  :: Word8
-pattern W8_CLOSE_SQUARE :: Word8
-pattern W8_OPEN_SQUARE  :: Word8
-pattern W8_OPEN_CURLY   :: Word8
-
-pattern W8_OPEN_CURLY   = 123
-pattern W8_OPEN_SQUARE  = 91
-pattern W8_CLOSE_CURLY  = 125
-pattern W8_CLOSE_SQUARE = 93
-
--- operators
-pattern W8_MINUS :: Word8
-pattern W8_PLUS  :: Word8
-
-pattern W8_PLUS  = 43
-pattern W8_MINUS = 45
-
--- digits
-pattern W8_0 :: Word8
-pattern W8_9 :: Word8
-
-pattern W8_0 = 48
-pattern W8_9 = 57
-
--- lower case
-pattern W8_e :: Word8
-pattern W8_f :: Word8
-pattern W8_n :: Word8
-pattern W8_t :: Word8
-
-pattern W8_e = 101
-pattern W8_f = 102
-pattern W8_n = 110
-pattern W8_t = 116
-
--- upper case
-pattern W8_E :: Word8
-pattern W8_E = 69
 
 
 -------------------------------------------------------------------------------
@@ -185,31 +131,33 @@ json' = value'
 -- toplevel Value parser to be called recursively, to keep the parameter
 -- mkObject outside of the recursive loop for proper inlining.
 
-object_ :: ([(Text, Value)] -> Either String Object) -> Parser Value -> Parser Value
-object_ mkObject val = {-# SCC "object_" #-} Object <$> objectValues mkObject jstring val
+object_ :: ([(Key, Value)] -> Either String Object) -> Parser Value -> Parser Value
+object_ mkObject val = Object <$> objectValues mkObject key val
 {-# INLINE object_ #-}
 
-object_' :: ([(Text, Value)] -> Either String Object) -> Parser Value -> Parser Value
-object_' mkObject val' = {-# SCC "object_'" #-} do
-  !vals <- objectValues mkObject jstring' val'
+object_' :: ([(Key, Value)] -> Either String Object) -> Parser Value -> Parser Value
+object_' mkObject val' = do
+  !vals <- objectValues mkObject key' val'
   return (Object vals)
  where
-  jstring' = do
-    !s <- jstring
+  key' = do
+    !s <- key
     return s
 {-# INLINE object_' #-}
 
-objectValues :: ([(Text, Value)] -> Either String Object)
-             -> Parser Text -> Parser Value -> Parser (H.HashMap Text Value)
+objectValues :: ([(Key, Value)] -> Either String Object)
+             -> Parser Key -> Parser Value -> Parser (KM.KeyMap Value)
 objectValues mkObject str val = do
   skipSpace
   w <- A.peekWord8'
   if w == W8_CLOSE_CURLY
-    then A.anyWord8 >> return H.empty
+    then A.anyWord8 >> return KM.empty
     else loop []
  where
-  -- Why use acc pattern here, you may ask? because 'H.fromList' use 'unsafeInsert'
-  -- and it's much faster because it's doing in place update to the 'HashMap'!
+  -- Why use acc pattern here, you may ask? because then the underlying 'KM.fromList'
+  -- implementation can make use of mutation when constructing a map. For example,
+  -- 'HashMap` uses 'unsafeInsert' and it's much faster because it's doing in place
+  -- update to the 'HashMap'!
   loop acc = do
     k <- (str A.<?> "object key") <* skipSpace <* (char ':' A.<?> "':'")
     v <- (val A.<?> "object value") <* skipSpace
@@ -223,11 +171,11 @@ objectValues mkObject str val = do
 {-# INLINE objectValues #-}
 
 array_ :: Parser Value -> Parser Value
-array_ val = {-# SCC "array_" #-} Array <$> arrayValues val
+array_ val = Array <$> arrayValues val
 {-# INLINE array_ #-}
 
 array_' :: Parser Value -> Parser Value
-array_' val = {-# SCC "array_'" #-} do
+array_' val = do
   !vals <- arrayValues val
   return (Array vals)
 {-# INLINE array_' #-}
@@ -250,7 +198,7 @@ arrayValues val = do
 
 -- | Parse any JSON value. Synonym of 'json'.
 value :: Parser Value
-value = jsonWith (pure . H.fromList)
+value = jsonWith (pure . KM.fromList)
 
 -- | Parse any JSON value.
 --
@@ -260,13 +208,13 @@ value = jsonWith (pure . H.fromList)
 --
 -- ==== __Examples__
 --
--- 'json' keeps only the first occurence of each key, using 'HashMap.Lazy.fromList'.
+-- 'json' keeps only the first occurrence of each key, using 'Data.Aeson.KeyMap.fromList'.
 --
 -- @
 -- 'json' = 'jsonWith' ('Right' '.' 'H.fromList')
 -- @
 --
--- 'jsonLast' keeps the last occurence of each key, using
+-- 'jsonLast' keeps the last occurrence of each key, using
 -- @'HashMap.Lazy.fromListWith' ('const' 'id')@.
 --
 -- @
@@ -285,7 +233,7 @@ value = jsonWith (pure . H.fromList)
 -- @
 -- 'jsonNoDup' = 'jsonWith' 'parseListNoDup'
 -- @
-jsonWith :: ([(Text, Value)] -> Either String Object) -> Parser Value
+jsonWith :: ([(Key, Value)] -> Either String Object) -> Parser Value
 jsonWith mkObject = fix $ \value_ -> do
   skipSpace
   w <- A.peekWord8'
@@ -301,9 +249,9 @@ jsonWith mkObject = fix $ \value_ -> do
       | otherwise    -> fail "not a valid json value"
 {-# INLINE jsonWith #-}
 
--- | Variant of 'json' which keeps only the last occurence of every key.
+-- | Variant of 'json' which keeps only the last occurrence of every key.
 jsonLast :: Parser Value
-jsonLast = jsonWith (Right . H.fromListWith (const id))
+jsonLast = jsonWith (Right . KM.fromListWith (const id))
 
 -- | Variant of 'json' wrapping all object mappings in 'Array' to preserve
 -- key-value pairs with the same keys.
@@ -318,25 +266,26 @@ jsonNoDup = jsonWith parseListNoDup
 -- associated values from the original list @kvs@.
 --
 -- >>> fromListAccum [("apple", Bool True), ("apple", Bool False), ("orange", Bool False)]
--- fromList [("apple", [Bool False, Bool True]), ("orange", [Bool False])]
-fromListAccum :: [(Text, Value)] -> Object
+-- fromList [("apple",Array [Bool False,Bool True]),("orange",Array [Bool False])]
+fromListAccum :: [(Key, Value)] -> Object
 fromListAccum =
-  fmap (Array . Vector.fromList . ($ [])) . H.fromListWith (.) . (fmap . fmap) (:)
+  fmap (Array . Vector.fromList . ($ [])) . KM.fromListWith (.) . (fmap . fmap) (:)
 
 -- | @'fromListNoDup' kvs@ fails if @kvs@ contains duplicate keys.
-parseListNoDup :: [(Text, Value)] -> Either String Object
+parseListNoDup :: [(Key, Value)] -> Either String Object
 parseListNoDup =
-  H.traverseWithKey unwrap . H.fromListWith (\_ _ -> Nothing) . (fmap . fmap) Just
+  KM.traverseWithKey unwrap . KM.fromListWith (\_ _ -> Nothing) . (fmap . fmap) Just
   where
+
     unwrap k Nothing = Left $ "found duplicate key: " ++ show k
     unwrap _ (Just v) = Right v
 
 -- | Strict version of 'value'. Synonym of 'json''.
 value' :: Parser Value
-value' = jsonWith' (pure . H.fromList)
+value' = jsonWith' (pure . KM.fromList)
 
 -- | Strict version of 'jsonWith'.
-jsonWith' :: ([(Text, Value)] -> Either String Object) -> Parser Value
+jsonWith' :: ([(Key, Value)] -> Either String Object) -> Parser Value
 jsonWith' mkObject = fix $ \value_ -> do
   skipSpace
   w <- A.peekWord8'
@@ -356,9 +305,9 @@ jsonWith' mkObject = fix $ \value_ -> do
                       | otherwise -> fail "not a valid json value"
 {-# INLINE jsonWith' #-}
 
--- | Variant of 'json'' which keeps only the last occurence of every key.
+-- | Variant of 'json'' which keeps only the last occurrence of every key.
 jsonLast' :: Parser Value
-jsonLast' = jsonWith' (pure . H.fromListWith (const id))
+jsonLast' = jsonWith' (pure . KM.fromListWith (const id))
 
 -- | Variant of 'json'' wrapping all object mappings in 'Array' to preserve
 -- key-value pairs with the same keys.
@@ -373,21 +322,25 @@ jsonNoDup' = jsonWith' parseListNoDup
 jstring :: Parser Text
 jstring = A.word8 W8_DOUBLE_QUOTE *> jstring_
 
+-- | Parse a JSON Key
+key :: Parser Key
+key = Key.fromText <$> jstring
+
 -- | Parse a string without a leading quote.
 jstring_ :: Parser Text
 {-# INLINE jstring_ #-}
 jstring_ = do
-  s <- A.takeWhile (\w -> w /= W8_DOUBLE_QUOTE && w /= W8_BACKSLASH && not (testBit w 7))
-  let txt = TE.decodeLatin1 s
-  w <- A.peekWord8
-  case w of
-    Nothing -> fail "string without end"
-    Just W8_DOUBLE_QUOTE -> A.anyWord8 $> txt
-    _ -> jstringSlow s
+  s <- A.takeWhile (\w -> w /= W8_DOUBLE_QUOTE && w /= W8_BACKSLASH && w >= 0x20 && w < 0x80)
+  mw <- A.peekWord8
+  case mw of
+    Nothing              -> fail "string without end"
+    Just W8_DOUBLE_QUOTE -> A.anyWord8 $> unsafeDecodeASCII s
+    Just w | w < 0x20    -> fail "unescaped control character"
+    _                    -> jstringSlow s
 
 jstringSlow :: B.ByteString -> Parser Text
 {-# INLINE jstringSlow #-}
-jstringSlow s' = {-# SCC "jstringSlow" #-} do
+jstringSlow s' = do
   s <- A.scan startState go <* A.anyWord8
   case unescapeText (B.append s' s) of
     Right r  -> return r
@@ -513,19 +466,6 @@ scientific = do
       fmap (Sci.scientific signedCoeff . (e +)) (signed decimal)) <|>
     return (Sci.scientific signedCoeff    e)
 {-# INLINE scientific #-}
-
------------------- Copy-pasted and adapted from base ------------------------
-
-bsToInteger :: B.ByteString -> Integer
-bsToInteger bs
-    | l > 40    = valInteger 10 l [ fromIntegral (w - W8_0) | w <- B.unpack bs ]
-    | otherwise = bsToIntegerSimple bs
-  where
-    l = B.length bs
-
-bsToIntegerSimple :: B.ByteString -> Integer
-bsToIntegerSimple = B.foldl' step 0 where
-  step a b = a * 10 + fromIntegral (b - W8_0)
 
 -- A sub-quadratic algorithm for Integer. Pairs of adjacent radix b
 -- digits are combined into a single radix b^2 digit. This process is
