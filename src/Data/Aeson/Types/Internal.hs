@@ -240,7 +240,7 @@ instance Read ErrorResp where
     readsPrec _ input = case decode input of
         Ok val -> [(val, "")]
         --NOTE: not throwing error since , readMaybe or readEither are also throwing exception
-        Text.JSON.Error msg -> error msg
+        Text.JSON.Error msg -> []--error msg
 
 example :: ErrorResp
 example = ErrorResp {
