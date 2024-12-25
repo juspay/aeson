@@ -148,6 +148,7 @@ library
     , uuid-types            >=1.0.5    && <1.1
     , vector                >=0.12.0.1 && <0.14
     , witherable            >=0.4.2    && <0.5
+    , json
 
   ghc-options:      -Wall
 
