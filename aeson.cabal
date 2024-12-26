@@ -1,5 +1,5 @@
 name:               aeson
-version:            2.1.2.1
+version:            2.1.3.0
 license:            BSD3
 license-file:       LICENSE
 category:           Text, Web, JSON
@@ -148,6 +148,7 @@ library
     , uuid-types            >=1.0.5    && <1.1
     , vector                >=0.12.0.1 && <0.14
     , witherable            >=0.4.2    && <0.5
+    , json
 
   ghc-options:      -Wall
 
