@@ -139,13 +139,13 @@ data JSONPathElement = Key Key
                      | Index {-# UNPACK #-} !Int
                        -- ^ JSON path element of an index into an
                        -- array, \"array[index]\".
-                       deriving (Eq, Typeable, Ord)
+                       deriving (Eq, Show, Typeable, Ord, Read)
 type JSONPath = [JSONPathElement]
 
 -- | The internal result of running a 'Parser'.
 data IResult a = IError JSONPath String
                | ISuccess a
-               deriving (Eq, Typeable)
+               deriving (Eq, Show, Typeable)
 
 data ErrorResp = ErrorResp {errorType :: ErrorType, errField :: Maybe String, objectType :: Maybe String, errMessage :: Maybe String , expectedValue :: Maybe String, actualValue :: Maybe String, jPath :: Maybe JSONPath}
     deriving (Eq, Typeable)
